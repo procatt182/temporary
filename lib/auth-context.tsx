@@ -4,12 +4,10 @@ import { createContext, useContext, useEffect, useState, useCallback, type React
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  sendEmailVerification,
   signOut as firebaseSignOut,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { doc, getDoc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import type { UserDocument, UserRole } from "@/lib/types";
 
@@ -18,44 +16,33 @@ interface AuthContextType {
   userDoc: UserDocument | null;
   loading: boolean;
   role: UserRole | null;
+  /** True when user is authenticated but has no Firestore document (not provisioned by admin). */
+  userNotProvisioned: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshUserDoc: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-/** Create or fetch the Firestore user document for a given Firebase Auth user. */
-async function ensureUserDoc(firebaseUser: User): Promise<void> {
+/** Check if a Firestore user document exists for this Firebase Auth user. */
+async function checkUserDoc(firebaseUser: User): Promise<boolean> {
   const ref = doc(db, "users", firebaseUser.uid);
   const snap = await getDoc(ref);
-  if (!snap.exists()) {
-    const newUser: UserDocument = {
-      uid: firebaseUser.uid,
-      email: firebaseUser.email || "",
-      role: "user",
-      createdAt: Date.now(),
-      subscriptionType: null,
-      purchaseDate: null,
-      expirationDate: null,
-      hwid: null,
-      hwidChangeCount: 0,
-      lastHwidChangeDate: null,
-    };
-    await setDoc(ref, newUser);
-  }
+  return snap.exists();
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [userDoc, setUserDoc] = useState<UserDocument | null>(null);
   const [loading, setLoading] = useState(true);
+  const [userNotProvisioned, setUserNotProvisioned] = useState(false);
 
   // Listen to Firestore user document in real-time
   useEffect(() => {
     if (!user) {
       setUserDoc(null);
+      setUserNotProvisioned(false);
       return;
     }
 
@@ -65,8 +52,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       (snap) => {
         if (snap.exists()) {
           setUserDoc(snap.data() as UserDocument);
+          setUserNotProvisioned(false);
         } else {
           setUserDoc(null);
+          setUserNotProvisioned(true);
         }
       },
       (error) => {
@@ -81,9 +70,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(firebaseUser);
       if (firebaseUser) {
         try {
-          await ensureUserDoc(firebaseUser);
+          const exists = await checkUserDoc(firebaseUser);
+          if (!exists) {
+            setUserNotProvisioned(true);
+          }
         } catch (err) {
-          console.error("Failed to ensure user doc:", err);
+          console.error("Failed to check user doc:", err);
         }
       }
       setLoading(false);
@@ -95,14 +87,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await signInWithEmailAndPassword(auth, email, password);
   };
 
-  const signUp = async (email: string, password: string) => {
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    await sendEmailVerification(cred.user);
-  };
-
   const signOut = async () => {
     await firebaseSignOut(auth);
     setUserDoc(null);
+    setUserNotProvisioned(false);
   };
 
   const refreshUserDoc = useCallback(async () => {
@@ -117,7 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const role = userDoc?.role ?? null;
 
   return (
-    <AuthContext.Provider value={{ user, userDoc, loading, role, signIn, signUp, signOut, refreshUserDoc }}>
+    <AuthContext.Provider value={{ user, userDoc, loading, role, userNotProvisioned, signIn, signOut, refreshUserDoc }}>
       {children}
     </AuthContext.Provider>
   );

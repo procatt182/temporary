@@ -1,9 +1,8 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import { doc, updateDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase";
 import { toast } from "sonner";
+import { useAuth } from "@/lib/auth-context";
 import type { UserDocument, SubscriptionType, UserRole } from "@/lib/types";
 import { isSubscriptionActive, subscriptionLabel, formatTimeRemaining } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
@@ -41,6 +40,9 @@ import {
   ChevronRight,
   Shield,
   Loader2,
+  UserPlus,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 interface Props {
@@ -50,16 +52,27 @@ interface Props {
 const ITEMS_PER_PAGE = 10;
 
 export function AdminUserManager({ users }: Props) {
+  const { user: currentUser } = useAuth();
   const [search, setSearch] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [editUser, setEditUser] = useState<UserDocument | null>(null);
   const [editLoading, setEditLoading] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createLoading, setCreateLoading] = useState(false);
 
   // Edit form state
   const [editRole, setEditRole] = useState<UserRole>("user");
   const [editSub, setEditSub] = useState<SubscriptionType>(null);
   const [editHwid, setEditHwid] = useState("");
   const [editExtendDays, setEditExtendDays] = useState("30");
+
+  // Create user form state
+  const [createEmail, setCreateEmail] = useState("");
+  const [createPassword, setCreatePassword] = useState("");
+  const [showCreatePassword, setShowCreatePassword] = useState(false);
+  const [createRole, setCreateRole] = useState<UserRole>("user");
+  const [createSub, setCreateSub] = useState<SubscriptionType>(null);
+  const [createHwid, setCreateHwid] = useState("");
 
   const filtered = useMemo(() => {
     return users.filter(
@@ -83,13 +96,25 @@ export function AdminUserManager({ users }: Props) {
     setEditExtendDays("30");
   };
 
-  const handleResetHwidCounter = async (user: UserDocument) => {
+  const adminUid = currentUser?.uid;
+
+  const handleResetHwidCounter = async (targetUser: UserDocument) => {
     try {
-      await updateDoc(doc(db, "users", user.uid), {
-        hwidChangeCount: 0,
-        lastHwidChangeDate: null,
+      const res = await fetch("/api/admin/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "resetHwidCounter",
+          adminUid,
+          targetUid: targetUser.uid,
+        }),
       });
-      toast.success(`HWID change counter reset for ${user.email}`);
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to reset HWID counter");
+        return;
+      }
+      toast.success(`HWID change counter reset for ${targetUser.email}`);
     } catch {
       toast.error("Failed to reset HWID counter");
     }
@@ -104,12 +129,21 @@ export function AdminUserManager({ users }: Props) {
     }
     setEditLoading(true);
     try {
-      const currentExp = editUser.expirationDate || Date.now();
-      const base = currentExp > Date.now() ? currentExp : Date.now();
-      const newExp = base + days * 24 * 60 * 60 * 1000;
-      await updateDoc(doc(db, "users", editUser.uid), {
-        expirationDate: newExp,
+      const res = await fetch("/api/admin/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "extendExpiration",
+          adminUid,
+          targetUid: editUser.uid,
+          days,
+        }),
       });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to extend expiration");
+        return;
+      }
       toast.success(`Extended expiration by ${days} days`);
     } catch {
       toast.error("Failed to extend expiration");
@@ -122,7 +156,10 @@ export function AdminUserManager({ users }: Props) {
     if (!editUser) return;
     setEditLoading(true);
     try {
-      const updates: Partial<UserDocument> = {
+      const params: Record<string, unknown> = {
+        action: "editUser",
+        adminUid,
+        targetUid: editUser.uid,
         role: editRole,
         subscriptionType: editSub,
         hwid: editHwid || null,
@@ -130,19 +167,28 @@ export function AdminUserManager({ users }: Props) {
 
       // If assigning a subscription and no purchase date, set one
       if (editSub && !editUser.purchaseDate) {
-        updates.purchaseDate = Date.now();
+        params.purchaseDate = Date.now();
       }
 
       // If subscription changed to lifetime, clear expiration
       if (editSub === "lifetime") {
-        updates.expirationDate = null;
+        params.expirationDate = null;
       } else if (editSub === "1month" && !editUser.expirationDate) {
-        updates.expirationDate = Date.now() + 30 * 24 * 60 * 60 * 1000;
+        params.expirationDate = Date.now() + 30 * 24 * 60 * 60 * 1000;
       } else if (editSub === "3months" && !editUser.expirationDate) {
-        updates.expirationDate = Date.now() + 90 * 24 * 60 * 60 * 1000;
+        params.expirationDate = Date.now() + 90 * 24 * 60 * 60 * 1000;
       }
 
-      await updateDoc(doc(db, "users", editUser.uid), updates);
+      const res = await fetch("/api/admin/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to update user");
+        return;
+      }
       toast.success(`Updated user ${editUser.email}`);
       setEditUser(null);
     } catch {
@@ -152,20 +198,82 @@ export function AdminUserManager({ users }: Props) {
     }
   };
 
+  const handleCreateUser = async () => {
+    if (!createEmail || !createPassword) {
+      toast.error("Email and password are required");
+      return;
+    }
+    if (createPassword.length < 6) {
+      toast.error("Password must be at least 6 characters");
+      return;
+    }
+    setCreateLoading(true);
+    try {
+      // Calculate expiration date based on subscription type
+      let expirationDate: number | null = null;
+      if (createSub === "1month") {
+        expirationDate = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      } else if (createSub === "3months") {
+        expirationDate = Date.now() + 90 * 24 * 60 * 60 * 1000;
+      }
+
+      const res = await fetch("/api/admin/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "createUser",
+          adminUid,
+          email: createEmail,
+          password: createPassword,
+          role: createRole,
+          subscriptionType: createSub,
+          expirationDate,
+          hwid: createHwid || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to create user");
+        return;
+      }
+      toast.success(`User ${createEmail} created successfully`);
+      setCreateDialogOpen(false);
+      // Reset form
+      setCreateEmail("");
+      setCreatePassword("");
+      setCreateRole("user");
+      setCreateSub(null);
+      setCreateHwid("");
+    } catch {
+      toast.error("Failed to create user");
+    } finally {
+      setCreateLoading(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
-      {/* Search */}
-      <div className="relative flex-1 sm:max-w-sm">
-        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          placeholder="Search by email or UID..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            setCurrentPage(1);
-          }}
-          className="h-10 border-border/50 bg-secondary/50 pl-9 text-foreground placeholder:text-muted-foreground/50 focus:border-primary/30 transition-colors"
-        />
+      {/* Search + Create User */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative flex-1 sm:max-w-sm">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search by email or UID..."
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="h-10 border-border/50 bg-secondary/50 pl-9 text-foreground placeholder:text-muted-foreground/50 focus:border-primary/30 transition-colors"
+          />
+        </div>
+        <Button
+          onClick={() => setCreateDialogOpen(true)}
+          className="bg-primary text-primary-foreground hover:bg-primary/90 transition-all hover:shadow-[0_0_16px_hsl(263_70%_58%/0.2)]"
+        >
+          <UserPlus className="mr-2 h-4 w-4" />
+          Create User
+        </Button>
       </div>
 
       {/* Table */}
@@ -391,6 +499,120 @@ export function AdminUserManager({ users }: Props) {
               >
                 {editLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Save Changes
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create User Dialog */}
+      <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+        <DialogContent className="glass sm:max-w-md !bg-card border-border/50">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Create New User</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              Manually add a new user with an active account. The user will be pre-verified and can sign in immediately.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4">
+            {/* Email */}
+            <div className="flex flex-col gap-2">
+              <Label className="text-sm text-muted-foreground">Email</Label>
+              <Input
+                type="email"
+                value={createEmail}
+                onChange={(e) => setCreateEmail(e.target.value)}
+                placeholder="user@example.com"
+                className="border-border/50 bg-secondary/50 text-foreground"
+              />
+            </div>
+
+            {/* Password */}
+            <div className="flex flex-col gap-2">
+              <Label className="text-sm text-muted-foreground">Password</Label>
+              <div className="relative">
+                <Input
+                  type={showCreatePassword ? "text" : "password"}
+                  value={createPassword}
+                  onChange={(e) => setCreatePassword(e.target.value)}
+                  placeholder="At least 6 characters"
+                  className="border-border/50 bg-secondary/50 pr-10 text-foreground"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCreatePassword(!showCreatePassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  aria-label={showCreatePassword ? "Hide password" : "Show password"}
+                >
+                  {showCreatePassword ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Role */}
+            <div className="flex flex-col gap-2">
+              <Label className="text-sm text-muted-foreground flex items-center gap-1.5">
+                <Shield className="h-3.5 w-3.5" /> Role
+              </Label>
+              <Select value={createRole} onValueChange={(v) => setCreateRole(v as UserRole)}>
+                <SelectTrigger className="border-border/50 bg-secondary/50 text-foreground">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-border/50">
+                  <SelectItem value="user">User</SelectItem>
+                  <SelectItem value="moderator">Moderator</SelectItem>
+                  <SelectItem value="admin">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Subscription */}
+            <div className="flex flex-col gap-2">
+              <Label className="text-sm text-muted-foreground">Subscription</Label>
+              <Select value={createSub || "none"} onValueChange={(v) => setCreateSub(v === "none" ? null : v as SubscriptionType)}>
+                <SelectTrigger className="border-border/50 bg-secondary/50 text-foreground">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-border/50">
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="1month">1 Month</SelectItem>
+                  <SelectItem value="3months">3 Months</SelectItem>
+                  <SelectItem value="lifetime">Lifetime</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* HWID (optional) */}
+            <div className="flex flex-col gap-2">
+              <Label className="text-sm text-muted-foreground">HWID (optional)</Label>
+              <Input
+                value={createHwid}
+                onChange={(e) => setCreateHwid(e.target.value)}
+                placeholder="Enter HWID hash (optional)..."
+                className="font-mono text-sm border-border/50 bg-secondary/50 text-foreground"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => setCreateDialogOpen(false)}
+                className="border-border/50 text-muted-foreground"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCreateUser}
+                disabled={createLoading || !createEmail || !createPassword}
+                className="bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {createLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Create User
               </Button>
             </div>
           </div>

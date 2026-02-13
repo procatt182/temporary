@@ -36,16 +36,15 @@ import {
   Loader2,
   Copy,
   Check,
+  Timer,
 } from "lucide-react";
 import { toast } from "sonner";
-import { doc, updateDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase";
-import { sha256 } from "@/lib/hash";
 
 export function UserDashboard() {
   const { userDoc, user, refreshUserDoc } = useAuth();
   const [tick, setTick] = useState(0);
   const [changeDialogOpen, setChangeDialogOpen] = useState(false);
+  const [setupDialogOpen, setSetupDialogOpen] = useState(false);
   const [newHwid, setNewHwid] = useState("");
   const [changeLoading, setChangeLoading] = useState(false);
   const [copiedHwid, setCopiedHwid] = useState(false);
@@ -64,6 +63,13 @@ export function UserDashboard() {
   const cooldownActive = cooldownMs > 0;
   const canChangeHwid = subActive && remaining > 0 && !cooldownActive;
 
+  // Calculate real-time expiry countdown
+  const expiryCountdown = userDoc.expirationDate
+    ? formatTimeRemaining(userDoc.expirationDate)
+    : userDoc.subscriptionType === "lifetime"
+      ? "Never"
+      : "N/A";
+
   const handleCopyHwid = async () => {
     if (!userDoc.hwid) return;
     await navigator.clipboard.writeText(userDoc.hwid);
@@ -77,7 +83,6 @@ export function UserDashboard() {
     setChangeLoading(true);
 
     try {
-      // Server-side validation via API route
       const res = await fetch("/api/hwid/change", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -109,12 +114,23 @@ export function UserDashboard() {
     setChangeLoading(true);
 
     try {
-      const hash = await sha256(newHwid.trim());
-      await updateDoc(doc(db, "users", user.uid), {
-        hwid: hash,
+      const res = await fetch("/api/hwid/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uid: user.uid,
+          hwid: newHwid.trim(),
+        }),
       });
-      toast.success("HWID set successfully");
-      setChangeDialogOpen(false);
+
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to set HWID");
+        return;
+      }
+
+      toast.success("HWID set successfully! Your license is now active.");
+      setSetupDialogOpen(false);
       setNewHwid("");
       await refreshUserDoc();
     } catch {
@@ -123,6 +139,70 @@ export function UserDashboard() {
       setChangeLoading(false);
     }
   };
+
+  // If user has subscription but no HWID, show setup prompt
+  if (subActive && !userDoc.hwid) {
+    return (
+      <div className="flex flex-col gap-6">
+        <div className="animate-fade-in-up">
+          <h1 className="text-2xl font-bold text-foreground">HWID Setup</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Complete your license activation by registering your hardware ID.
+          </p>
+        </div>
+
+        <div className="glass-glow rounded-xl p-8 animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+          <div className="flex flex-col items-center text-center gap-6">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 ring-1 ring-primary/20 glow-border">
+              <Fingerprint className="h-8 w-8 text-primary" />
+            </div>
+
+            <div>
+              <h2 className="text-xl font-semibold text-foreground mb-2">Register Your HWID</h2>
+              <p className="text-sm text-muted-foreground leading-relaxed max-w-md">
+                Your subscription is active, but you need to register your Hardware ID to activate your license.
+                Run the client on your device to find your HWID.
+              </p>
+            </div>
+
+            {/* How to find HWID instructions */}
+            <div className="w-full rounded-lg border border-border/50 bg-secondary/30 p-4 text-left">
+              <h3 className="text-sm font-medium text-foreground mb-2">How to find your HWID:</h3>
+              <ol className="flex flex-col gap-1.5 text-sm text-muted-foreground list-decimal pl-4">
+                <li>Download and run the Hernia Client on your device</li>
+                <li>The HWID will be displayed on the client login screen</li>
+                <li>Copy the HWID string and paste it below</li>
+              </ol>
+            </div>
+
+            <div className="w-full flex flex-col gap-3">
+              <div className="flex flex-col gap-2 text-left">
+                <Label className="text-sm text-muted-foreground">Your HWID</Label>
+                <Input
+                  value={newHwid}
+                  onChange={(e) => setNewHwid(e.target.value)}
+                  placeholder="Enter your HWID string or SHA-256 hash..."
+                  className="font-mono text-sm border-border/50 bg-secondary/50 text-foreground"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Raw strings will be automatically hashed using SHA-256.
+                </p>
+              </div>
+
+              <Button
+                onClick={handleSetInitialHwid}
+                disabled={changeLoading || !newHwid.trim()}
+                className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {changeLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Activate License
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -184,22 +264,43 @@ export function UserDashboard() {
               </p>
             </div>
             <div className="rounded-lg bg-secondary/30 p-4">
-              <p className="text-xs text-muted-foreground">Expires</p>
+              <div className="flex items-center gap-1.5">
+                <Timer className="h-3.5 w-3.5 text-muted-foreground" />
+                <p className="text-xs text-muted-foreground">
+                  {subActive ? "Time Remaining" : "Expires"}
+                </p>
+              </div>
               <p className="mt-1 text-lg font-semibold text-foreground tabular-nums">
-                {userDoc.subscriptionType === "lifetime"
-                  ? "Never"
-                  : userDoc.expirationDate
-                    ? formatTimeRemaining(userDoc.expirationDate)
-                    : "N/A"}
+                {expiryCountdown}
               </p>
             </div>
+          </div>
+        )}
+
+        {/* Expiration date display */}
+        {userDoc.expirationDate && userDoc.subscriptionType !== "lifetime" && (
+          <div className="mt-4 rounded-lg border border-border/50 bg-secondary/20 p-3 flex items-center gap-3">
+            <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
+            <p className="text-sm text-muted-foreground">
+              Expires on:{" "}
+              <span className="text-foreground font-medium">
+                {new Date(userDoc.expirationDate).toLocaleDateString("en-US", {
+                  weekday: "long",
+                  year: "numeric",
+                  month: "long",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </span>
+            </p>
           </div>
         )}
 
         {!userDoc.subscriptionType && (
           <div className="mt-6 rounded-lg border border-border/50 bg-secondary/30 p-4 text-center">
             <p className="mb-3 text-sm text-muted-foreground">
-              You don't have an active subscription. Join our Discord to purchase a license.
+              {"You don't have an active subscription. Join our Discord to purchase a license."}
             </p>
             <Button asChild size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90">
               <a href={DISCORD_INVITE_URL} target="_blank" rel="noopener noreferrer">
@@ -244,23 +345,6 @@ export function UserDashboard() {
                 )}
               </Button>
             </div>
-          </div>
-        ) : subActive ? (
-          <div className="mb-6 rounded-lg border border-amber-400/20 bg-amber-400/5 p-4">
-            <div className="flex items-center gap-2 text-amber-400 mb-2">
-              <AlertTriangle className="h-4 w-4" />
-              <p className="text-sm font-medium">HWID Not Set</p>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">
-              You need to set your HWID to activate your license. Run the client on your device to find your HWID.
-            </p>
-            <Button
-              size="sm"
-              onClick={() => setChangeDialogOpen(true)}
-              className="bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              Set HWID
-            </Button>
           </div>
         ) : null}
 
@@ -334,13 +418,9 @@ export function UserDashboard() {
       <Dialog open={changeDialogOpen} onOpenChange={setChangeDialogOpen}>
         <DialogContent className="glass sm:max-w-md !bg-card border-border/50">
           <DialogHeader>
-            <DialogTitle className="text-foreground">
-              {userDoc.hwid ? "Change HWID" : "Set HWID"}
-            </DialogTitle>
+            <DialogTitle className="text-foreground">Change HWID</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              {userDoc.hwid
-                ? `You have ${remaining} change(s) remaining. Enter your new HWID below.`
-                : "Enter your HWID to activate your license. You can find this by running the client on your device."}
+              {`You have ${remaining} change(s) remaining. Enter your new HWID below.`}
             </DialogDescription>
           </DialogHeader>
 
@@ -369,12 +449,12 @@ export function UserDashboard() {
                 Cancel
               </Button>
               <Button
-                onClick={userDoc.hwid ? handleChangeHwid : handleSetInitialHwid}
+                onClick={handleChangeHwid}
                 disabled={changeLoading || !newHwid.trim()}
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 {changeLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                {userDoc.hwid ? "Change HWID" : "Set HWID"}
+                Change HWID
               </Button>
             </div>
           </div>

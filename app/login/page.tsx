@@ -8,10 +8,9 @@ import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Shield, Loader2, Eye, EyeOff, ArrowLeft, Mail } from "lucide-react";
+import { Shield, Loader2, Eye, EyeOff, ArrowLeft, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
-
-type Mode = "signin" | "signup";
+import { DISCORD_INVITE_URL } from "@/lib/types";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -19,9 +18,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<Mode>("signin");
-  const [verificationSent, setVerificationSent] = useState(false);
-  const { signIn, signUp } = useAuth();
+  const { signIn } = useAuth();
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -30,61 +27,21 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      if (mode === "signup") {
-        await signUp(email, password);
-        setVerificationSent(true);
-        toast.success("Account created! Check your email to verify.");
-      } else {
-        await signIn(email, password);
-        router.push("/dashboard");
-      }
+      await signIn(email, password);
+      router.push("/dashboard");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "An error occurred";
-      if (message.includes("email-already-in-use")) {
-        setError("An account with this email already exists.");
-      } else if (message.includes("weak-password")) {
-        setError("Password should be at least 6 characters.");
-      } else if (message.includes("invalid-email")) {
+      if (message.includes("invalid-email")) {
         setError("Please enter a valid email address.");
+      } else if (message.includes("user-not-found") || message.includes("invalid-credential")) {
+        setError("Invalid email or password.");
       } else {
-        setError(mode === "signin" ? "Invalid email or password." : "Failed to create account.");
+        setError("Invalid email or password.");
       }
     } finally {
       setLoading(false);
     }
   };
-
-  if (verificationSent) {
-    return (
-      <div className="relative flex min-h-screen items-center justify-center bg-background p-4 grid-bg">
-        <div className="pointer-events-none fixed inset-0 overflow-hidden">
-          <div className="absolute -left-40 -top-40 h-[500px] w-[500px] rounded-full bg-primary/5 blur-[100px]" />
-          <div className="absolute -bottom-40 -right-40 h-[500px] w-[500px] rounded-full bg-primary/3 blur-[100px]" />
-        </div>
-        <div className="relative z-10 w-full max-w-md animate-fade-in-up">
-          <div className="glass-glow rounded-2xl p-8 text-center">
-            <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-xl bg-primary/10 ring-1 ring-primary/20">
-              <Mail className="h-7 w-7 text-primary" />
-            </div>
-            <h1 className="mb-2 text-2xl font-semibold text-foreground">Check Your Email</h1>
-            <p className="mb-6 text-sm text-muted-foreground leading-relaxed">
-              {"We've sent a verification link to"} <strong className="text-foreground">{email}</strong>.
-              Please verify your email before signing in.
-            </p>
-            <Button
-              onClick={() => {
-                setVerificationSent(false);
-                setMode("signin");
-              }}
-              className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              Back to Sign In
-            </Button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-background p-4 grid-bg">
@@ -114,12 +71,10 @@ export default function LoginPage() {
             </div>
             <div className="text-center">
               <h1 className="text-2xl font-semibold text-foreground text-balance">
-                {mode === "signin" ? "Welcome Back" : "Create Account"}
+                Welcome Back
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                {mode === "signin"
-                  ? "Sign in to your account"
-                  : "Sign up to get started"}
+                Sign in to your account
               </p>
             </div>
           </div>
@@ -148,7 +103,7 @@ export default function LoginPage() {
                 <Input
                   id="password"
                   type={showPassword ? "text" : "password"}
-                  placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}
+                  placeholder="Enter your password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
@@ -183,36 +138,27 @@ export default function LoginPage() {
               {loading ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : null}
-              {loading
-                ? mode === "signin" ? "Signing in..." : "Creating account..."
-                : mode === "signin" ? "Sign In" : "Create Account"}
+              {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
 
-          {/* Toggle mode */}
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            {mode === "signin" ? (
-              <>
-                {"Don't have an account? "}
-                <button
-                  onClick={() => { setMode("signup"); setError(""); }}
-                  className="font-medium text-primary hover:text-primary/80 transition-colors"
-                >
-                  Sign Up
-                </button>
-              </>
-            ) : (
-              <>
-                {"Already have an account? "}
-                <button
-                  onClick={() => { setMode("signin"); setError(""); }}
-                  className="font-medium text-primary hover:text-primary/80 transition-colors"
-                >
-                  Sign In
-                </button>
-              </>
-            )}
-          </p>
+          {/* No account notice */}
+          <div className="mt-6 rounded-lg border border-border/50 bg-secondary/30 p-4 text-center">
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              {"Don't have an account? Your account must be created by an admin."}
+            </p>
+            <Button
+              asChild
+              variant="link"
+              size="sm"
+              className="mt-2 text-primary hover:text-primary/80"
+            >
+              <a href={DISCORD_INVITE_URL} target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                Join our Discord for access
+              </a>
+            </Button>
+          </div>
         </div>
       </div>
     </div>
